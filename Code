@@ -1,1 +1,1289 @@
 
+# miRBench Benchmarking - TargetNet and RNACofold
+# Dataset: AGO2_CLASH_Hejret2023 (test)
+# Official test set: 1018 samples (523 negative, 495 positive)
+# Thresholds used for classification: 0.5 and 0.7
+#
+# This file collects the main commands/scripts used in the analysis.
+# Run commands from WSL/Ubuntu unless noted otherwise.
+
+============================================================
+1) CONDA / ENVIRONMENT CHECKS
+============================================================
+
+# List all conda environments
+conda env list
+
+# Activate TargetNet
+conda activate targetnet
+
+# Check Python
+python --version
+
+# Check PyTorch
+python -c "import torch; print(torch.__version__)"
+
+# Check installed Torch/MKL packages
+conda list | grep -E "torch|mkl|intel"
+
+# TargetNet project
+cd ~/miRBench
+
+
+============================================================
+2) TARGETNET - ENVIRONMENT FIX / DEPENDENCIES
+============================================================
+
+# If Biopython is missing
+conda install -c conda-forge biopython -y
+
+# If scikit-learn is missing
+conda install scikit-learn -y
+
+# If openpyxl is missing (for Excel output)
+pip install openpyxl
+
+# Test Biopython
+python -c "from Bio import pairwise2; print('Biopython OK')"
+
+# Test TargetNet predictor initialization
+python -c "import sys; sys.path.insert(0,'src'); from miRBench.predictor import get_predictor; p=get_predictor('TargetNet_Min2021'); print(type(p))"
+
+
+============================================================
+3) OFFICIAL miRBench DATASET
+============================================================
+
+# Official dataset path:
+# /home/mohannad/.miRBench/datasets/20540907/AGO2_CLASH_Hejret2023/test/dataset.tsv
+
+# Check the official dataset
+python - <<'PY'
+import pandas as pd
+
+path = "/home/mohannad/.miRBench/datasets/20540907/AGO2_CLASH_Hejret2023/test/dataset.tsv"
+
+df = pd.read_csv(path, sep="\t")
+
+print("Shape:", df.shape)
+print("Labels:")
+print(df["label"].value_counts())
+print(df.head())
+PY
+
+
+============================================================
+4) TARGETNET - TEST PREDICTION
+============================================================
+
+# Small single-sample test used to verify the installation
+
+python - <<'PY'
+import sys
+import pandas as pd
+
+sys.path.insert(0, "src")
+
+from miRBench.encoder import get_encoder
+from miRBench.predictor import get_predictor
+
+df = pd.DataFrame({
+    "noncodingRNA": ["UGAGGUAGUAGGUUGUAUAGUU"],
+    "gene": ["AUGCUAGCUAGCUAGCUAGCUAGCUAGCUAGCUAGCUAG"]
+})
+
+encoder = get_encoder("TargetNet_Min2021")
+data = encoder(df)
+
+print("Encoder output:", data)
+print("Number of batches:", len(data))
+
+predictor = get_predictor("TargetNet_Min2021")
+predictions = predictor.predict(data)
+
+print("Prediction:", predictions)
+PY
+
+# Example successful test prediction:
+# Prediction: [0.61688334]
+
+
+============================================================
+5) TARGETNET - OFFICIAL 1018 SAMPLES
+# Produces the raw prediction scores for all official samples.
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import sys
+import pandas as pd
+import numpy as np
+
+sys.path.insert(0, "src")
+
+from miRBench.encoder import get_encoder
+from miRBench.predictor import get_predictor
+
+dataset_path = "/home/mohannad/.miRBench/datasets/20540907/AGO2_CLASH_Hejret2023/test/dataset.tsv"
+
+df = pd.read_csv(dataset_path, sep="\t")
+
+encoder = get_encoder("TargetNet_Min2021")
+
+data = encoder(
+    df,
+    miRNA_col="noncodingRNA",
+    gene_col="gene",
+    batch_size=64,
+    shuffle=False
+)
+
+predictor = get_predictor("TargetNet_Min2021")
+
+scores = np.asarray(
+    predictor.predict(data),
+    dtype=float
+).flatten()
+
+prediction_file = pd.DataFrame({
+    "sample_number": range(1, len(df) + 1),
+    "miRNA_seq": df["noncodingRNA"].values,
+    "gene_seq": df["gene"].values,
+    "label": df["label"].astype(int).values,
+    "prediction_score": scores
+})
+
+prediction_file.to_csv(
+    "TargetNet_1018_prediction_file.csv",
+    index=False
+)
+
+print("Saved: TargetNet_1018_prediction_file.csv")
+print("Rows:", len(prediction_file))
+print(prediction_file.head(10).to_string(index=False))
+PY
+
+
+============================================================
+6) TARGETNET - METRICS (0.5 AND 0.7)
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import pandas as pd
+from sklearn.metrics import (
+    average_precision_score,
+    roc_auc_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix
+)
+
+df = pd.read_csv("TargetNet_1018_prediction_file.csv")
+
+y_true = df["label"].astype(int)
+
+print("============================================")
+print("TARGETNET - AGO2_CLASH_Hejret2023 (test)")
+print("============================================")
+
+for threshold in [0.5, 0.7]:
+
+    y_score = df["prediction_score"]
+    y_pred = (y_score >= threshold).astype(int)
+
+    ap = average_precision_score(y_true, y_score)
+    roc_auc = roc_auc_score(y_true, y_score)
+
+    accuracy = accuracy_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+
+    tn, fp, fn, tp = confusion_matrix(
+        y_true,
+        y_pred,
+        labels=[0, 1]
+    ).ravel()
+
+    specificity = tn / (tn + fp) if (tn + fp) else 0.0
+
+    print("\n--------------------------------------------")
+    print(f"Threshold = {threshold}")
+    print("--------------------------------------------")
+    print(f"Samples      : {len(df)}")
+    print(f"AP           : {ap:.4f}")
+    print(f"ROC-AUC      : {roc_auc:.4f}")
+    print(f"Accuracy     : {accuracy:.4f}")
+    print(f"Precision    : {precision:.4f}")
+    print(f"Recall       : {recall:.4f}")
+    print(f"Specificity  : {specificity:.4f}")
+    print(f"F1-Score     : {f1:.4f}")
+    print(f"TN           : {tn}")
+    print(f"FP           : {fp}")
+    print(f"FN           : {fn}")
+    print(f"TP           : {tp}")
+    print(f"Predicted +  : {y_pred.sum()}")
+PY
+
+# Notes:
+# AP and ROC-AUC use continuous prediction_score and do not change
+# when threshold changes.
+# Accuracy/Precision/Recall/Specificity/F1/TN/FP/FN/TP depend on threshold.
+
+
+============================================================
+7) TARGETNET - EXCEL WITH SEPARATE SHEETS FOR 0.5 AND 0.7
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("TargetNet_1018_prediction_file.csv")
+
+output = "TargetNet_1018_Thresholds.xlsx"
+
+with pd.ExcelWriter(output, engine="openpyxl"):
+
+    for threshold in [0.5, 0.7]:
+
+        result = df.copy()
+
+        result["prediction"] = (
+            result["prediction_score"] >= threshold
+        ).astype(int)
+
+        result = result[
+            [
+                "sample_number",
+                "miRNA_seq",
+                "gene_seq",
+                "label",
+                "prediction_score",
+                "prediction"
+            ]
+        ]
+
+        result.to_excel(
+            output,
+            sheet_name=f"Threshold_{threshold}",
+            index=False
+        )
+
+        print(
+            f"Threshold {threshold}: "
+            f"{result['prediction'].sum()} predicted positives"
+        )
+
+print(f"Saved: {output}")
+PY
+
+# NOTE:
+# If the ExcelWriter version above gives an issue, use this corrected form:
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("TargetNet_1018_prediction_file.csv")
+
+output = "TargetNet_1018_Thresholds.xlsx"
+
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+    for threshold in [0.5, 0.7]:
+
+        result = df.copy()
+
+        result["prediction"] = (
+            result["prediction_score"] >= threshold
+        ).astype(int)
+
+        result = result[
+            [
+                "sample_number",
+                "miRNA_seq",
+                "gene_seq",
+                "label",
+                "prediction_score",
+                "prediction"
+            ]
+        ]
+
+        result.to_excel(
+            writer,
+            sheet_name=f"Threshold_{threshold}",
+            index=False
+        )
+
+print(f"Saved: {output}")
+PY
+
+
+============================================================
+8) OPEN TARGETNET EXCEL
+============================================================
+
+explorer.exe "$(wslpath -w ~/miRBench/TargetNet_1018_Thresholds.xlsx)"
+
+
+============================================================
+9) RNACOFOLD - NEW ENVIRONMENT
+============================================================
+
+# Create a separate environment
+conda create -n rnacofold python=3.10 -y
+
+# Activate it
+conda activate rnacofold
+
+# Install ViennaRNA
+conda install -c bioconda viennarna -y
+
+# Install other packages
+pip install pandas numpy scikit-learn
+
+# For Excel output
+pip install openpyxl
+
+
+============================================================
+10) RNACOFOLD - FIX VIENNA RNA / GSL
+============================================================
+
+# We encountered:
+# ImportError: libgsl.so.25: cannot open shared object file
+
+# Check GSL
+conda list gsl
+
+# Reinstall compatible versions used successfully
+conda remove viennarna gsl -y
+
+conda install -c bioconda -c conda-forge viennarna=2.6.4 gsl=2.7 -y
+
+# Verify
+python -c "import RNA; print('ViennaRNA OK:', RNA.__version__)"
+
+# Successful version:
+# ViennaRNA OK: 2.6.4
+
+# miRBench imports TensorFlow even for the RNACofold predictor,
+# so install TensorFlow in this environment if needed:
+pip install tensorflow==2.15.1
+
+
+============================================================
+11) RNACOFOLD - CHECK ENVIRONMENT
+============================================================
+
+conda activate rnacofold
+cd ~/miRBench
+
+python -c "import RNA; print('ViennaRNA:', RNA.__version__)"
+
+python -c "import tensorflow as tf; print('TensorFlow:', tf.__version__)"
+
+
+============================================================
+12) RNACOFOLD - OFFICIAL 1018 SAMPLES
+# Saves RNACofold scores with sample_number.
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import sys
+import pandas as pd
+import numpy as np
+
+sys.path.insert(0, "src")
+
+from miRBench.encoder import get_encoder
+from miRBench.predictor import get_predictor
+
+dataset_path = "/home/mohannad/.miRBench/datasets/20540907/AGO2_CLASH_Hejret2023/test/dataset.tsv"
+
+df = pd.read_csv(dataset_path, sep="\t")
+
+print("Dataset:", df.shape)
+print("Labels:")
+print(df["label"].value_counts())
+
+encoder = get_encoder("RNACofold")
+data = encoder(df)
+
+print("Encoded samples:", len(data))
+
+predictor = get_predictor("RNACofold")
+
+predictions = predictor.predict(data)
+
+predictions = np.asarray(predictions, dtype=float).flatten()
+
+print("Predictions:", len(predictions))
+
+results = pd.DataFrame({
+    "sample_number": range(1, len(df) + 1),
+    "mirna_id": (
+        df["noncodingRNA_name"].values
+        if "noncodingRNA_name" in df.columns
+        else [f"miRNA_{i}" for i in range(len(df))]
+    ),
+    "mirna_seq": df["noncodingRNA"].values,
+    "mrna_seq": df["gene"].values,
+    "label": df["label"].astype(int).values,
+    "prediction_score": predictions
+})
+
+results.to_csv(
+    "RNACofold_1018_results.csv",
+    index=False
+)
+
+print("\nSaved: RNACofold_1018_results.csv")
+print("Rows:", len(results))
+print(results.head().to_string(index=False))
+PY
+
+
+============================================================
+13) RNACOFOLD - METRICS (0.5 AND 0.7)
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import pandas as pd
+from sklearn.metrics import (
+    average_precision_score,
+    roc_auc_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix
+)
+
+df = pd.read_csv("RNACofold_1018_results.csv")
+
+y_true = df["label"].astype(int)
+y_score = df["prediction_score"]
+
+print("============================================")
+print("RNACOFOLD - AGO2_CLASH_Hejret2023 (test)")
+print("============================================")
+
+for threshold in [0.5, 0.7]:
+
+    y_pred = (y_score >= threshold).astype(int)
+
+    ap = average_precision_score(y_true, y_score)
+    roc_auc = roc_auc_score(y_true, y_score)
+
+    accuracy = accuracy_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+
+    tn, fp, fn, tp = confusion_matrix(
+        y_true,
+        y_pred,
+        labels=[0, 1]
+    ).ravel()
+
+    specificity = tn / (tn + fp) if (tn + fp) else 0.0
+
+    print("\n--------------------------------------------")
+    print(f"Threshold = {threshold}")
+    print("--------------------------------------------")
+    print(f"Samples      : {len(df)}")
+    print(f"AP           : {ap:.4f}")
+    print(f"ROC-AUC      : {roc_auc:.4f}")
+    print(f"Accuracy     : {accuracy:.4f}")
+    print(f"Precision    : {precision:.4f}")
+    print(f"Recall       : {recall:.4f}")
+    print(f"Specificity  : {specificity:.4f}")
+    print(f"F1-Score     : {f1:.4f}")
+    print(f"TN           : {tn}")
+    print(f"FP           : {fp}")
+    print(f"FN           : {fn}")
+    print(f"TP           : {tp}")
+    print(f"Predicted +  : {y_pred.sum()}")
+PY
+
+
+============================================================
+14) RNACOFOLD - EXCEL WITH SEPARATE SHEETS
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("RNACofold_1018_results.csv")
+
+output = "RNACofold_1018_Thresholds.xlsx"
+
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+    for threshold in [0.5, 0.7]:
+
+        result = df.copy()
+
+        result["prediction"] = (
+            result["prediction_score"] >= threshold
+        ).astype(int)
+
+        result = result[
+            [
+                "sample_number",
+                "mirna_seq",
+                "mrna_seq",
+                "label",
+                "prediction_score",
+                "prediction"
+            ]
+        ]
+
+        result.to_excel(
+            writer,
+            sheet_name=f"Threshold_{threshold}",
+            index=False
+        )
+
+print(f"Saved: {output}")
+PY
+
+
+============================================================
+15) OPEN RNACOFOLD EXCEL
+============================================================
+
+explorer.exe "$(wslpath -w ~/miRBench/RNACofold_1018_Thresholds.xlsx)"
+
+
+============================================================
+16) TRUE POSITIVE (TP) RESULTS ONLY - TARGETNET
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("TargetNet_1018_prediction_file.csv")
+
+for threshold in [0.5, 0.7]:
+
+    tp = df[
+        (df["label"] == 1) &
+        (df["prediction_score"] >= threshold)
+    ].copy()
+
+    print("\n" + "=" * 70)
+    print(f"TargetNet - TRUE POSITIVES - Threshold = {threshold}")
+    print("=" * 70)
+
+    print("TP count:", len(tp))
+
+    print(
+        tp[
+            [
+                "sample_number",
+                "miRNA_seq",
+                "gene_seq",
+                "label",
+                "prediction_score"
+            ]
+        ].to_string(index=False)
+    )
+PY
+
+
+============================================================
+17) TRUE POSITIVE (TP) RESULTS ONLY - RNACOFOLD
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("RNACofold_1018_results.csv")
+
+for threshold in [0.5, 0.7]:
+
+    tp = df[
+        (df["label"] == 1) &
+        (df["prediction_score"] >= threshold)
+    ].copy()
+
+    print("\n" + "=" * 70)
+    print(f"RNACofold - TRUE POSITIVES - Threshold = {threshold}")
+    print("=" * 70)
+
+    print("TP count:", len(tp))
+
+    print(
+        tp.to_string(index=False)
+    )
+PY
+
+
+============================================================
+18) TRUE POSITIVE EXCEL - TARGETNET
+# One Excel file, separate sheet for 0.5 and 0.7.
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("TargetNet_1018_prediction_file.csv")
+
+output = "TargetNet_1018_TruePositives.xlsx"
+
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+    for threshold in [0.5, 0.7]:
+
+        tp = df[
+            (df["label"] == 1) &
+            (df["prediction_score"] >= threshold)
+        ].copy()
+
+        tp["threshold"] = threshold
+
+        tp.to_excel(
+            writer,
+            sheet_name=f"TP_{threshold}",
+            index=False
+        )
+
+        print(
+            f"Threshold {threshold}: "
+            f"{len(tp)} TP"
+        )
+
+print(f"\nSaved: {output}")
+PY
+
+
+============================================================
+19) TRUE POSITIVE EXCEL - RNACOFOLD
+# One Excel file, separate sheet for 0.5 and 0.7.
+============================================================
+
+cd ~/miRBench
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("RNACofold_1018_results.csv")
+
+output = "RNACofold_1018_TruePositives.xlsx"
+
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+    for threshold in [0.5, 0.7]:
+
+        tp = df[
+            (df["label"] == 1) &
+            (df["prediction_score"] >= threshold)
+        ].copy()
+
+        tp["threshold"] = threshold
+
+        tp.to_excel(
+            writer,
+            sheet_name=f"TP_{threshold}",
+            index=False
+        )
+
+        print(
+            f"Threshold {threshold}: "
+            f"{len(tp)} TP"
+        )
+
+print(f"\nSaved: {output}")
+PY
+
+
+============================================================
+20) OPEN TP EXCEL FILES
+============================================================
+
+# TargetNet
+explorer.exe "$(wslpath -w ~/miRBench/TargetNet_1018_TruePositives.xlsx)"
+
+# RNACofold
+explorer.exe "$(wslpath -w ~/miRBench/RNACofold_1018_TruePositives.xlsx)"
+
+
+============================================================
+21) NOTES FOR THE REPORT
+============================================================
+
+# Official dataset:
+# AGO2_CLASH_Hejret2023 (test)
+# 1018 samples
+# 523 negatives
+# 495 positives
+
+# TargetNet official reproduction:
+# AP = 0.5533
+# ROC-AUC = 0.5695
+# (The classification metrics depend on the chosen threshold.)
+
+# TargetNet AP = 0.5533 matches the published miRBench value
+# 0.5533 for this test split.
+
+# Threshold-dependent metrics:
+# Accuracy = (TP + TN) / (TP + TN + FP + FN)
+# Precision = TP / (TP + FP)
+# Recall / Sensitivity = TP / (TP + FN)
+# Specificity = TN / (TN + FP)
+# F1 = 2 * Precision * Recall / (Precision + Recall)
+
+# Threshold-independent metrics:
+# AP and ROC-AUC are calculated from continuous prediction scores
+# and do not depend on threshold 0.5 or 0.7.
+
+# IMPORTANT FOR RNACOFOLD:
+# RNAcofold produces an energy/MFE-related score, not necessarily
+# a probability like TargetNet. Make sure the exact score transformation
+# used in your miRBench RNACofold implementation is documented before
+# comparing numerical AP/ROC-AUC values across tools.
+
+
+============================================================
+22) USEFUL CHECKS
+============================================================
+
+# Check files
+ls -lh ~/miRBench/*TargetNet* ~/miRBench/*RNACofold* 2>/dev/null
+
+# Check prediction file columns
+python - <<'PY'
+import pandas as pd
+
+for f in [
+    "TargetNet_1018_prediction_file.csv",
+    "RNACofold_1018_results.csv"
+]:
+    try:
+        df = pd.read_csv(f)
+        print("\nFILE:", f)
+        print("Shape:", df.shape)
+        print("Columns:", list(df.columns))
+        print(df.head(3).to_string(index=False))
+    except FileNotFoundError:
+        print("\nMissing:", f)
+PY
+============================================================
+23) GRAPHTAR - ENVIRONMENT
+============================================================
+
+# Activate GraphTar environment
+conda activate graphtar
+
+# Go to GraphTar project
+cd ~/graphtar
+
+# Check Python
+python --version
+
+# Check installed packages
+pip list
+
+
+============================================================
+24) GRAPHTAR - MODEL FILES
+============================================================
+
+# GraphTar Word2Vec models
+# These files were used for sequence representation:
+
+# word2vec_deepmirtar_418_mirna.model
+# word2vec_deepmirtar_418_target.model
+
+# GraphTar checkpoint:
+# graphtar_net_graphtar_config_deepmirtar_w2v_GCN_128_418_0.001.ckpt
+
+# Check the files
+
+ls -lh ~/graphtar
+
+ls -lh ~/graphtar/*word2vec*
+ls -lh ~/graphtar/*ckpt
+
+
+============================================================
+25) GRAPHTAR - OFFICIAL AGO2 CLASH DATASET
+============================================================
+
+# Official miRBench dataset:
+# AGO2_CLASH_Hejret2023 (test)
+# 1018 samples
+# 523 negatives
+# 495 positives
+
+DATASET="/home/mohannad/.miRBench/datasets/20540907/AGO2_CLASH_Hejret2023/test/dataset.tsv"
+
+# Check dataset
+
+python - <<'PY'
+import pandas as pd
+
+path = "/home/mohannad/.miRBench/datasets/20540907/AGO2_CLASH_Hejret2023/test/dataset.tsv"
+
+df = pd.read_csv(path, sep="\t")
+
+print("Dataset shape:", df.shape)
+print("\nColumns:")
+print(df.columns.tolist())
+
+print("\nLabels:")
+print(df["label"].value_counts())
+
+print("\nFirst rows:")
+print(df.head().to_string(index=False))
+PY
+
+
+============================================================
+26) GRAPHTAR - DATA ADAPTER
+============================================================
+
+# GraphTar expects specific input columns for the miRNA-target
+# representation and model preprocessing.
+
+# The AGO2_CLASH_Hejret2023 dataset contains:
+#
+# gene
+# noncodingRNA
+# label
+#
+# Therefore, an adapter was used to convert the official dataset
+# into the format required by GraphTar.
+
+cd ~/graphtar
+
+# Adapter/inference script:
+# ago2_inference.py
+
+python ago2_inference.py
+
+
+============================================================
+27) GRAPHTAR - WORD2VEC REPRESENTATION
+============================================================
+
+# GraphTar uses pretrained Word2Vec representations for:
+#
+# miRNA sequences
+# target/gene sequences
+#
+# The models used were:
+
+# word2vec_deepmirtar_418_mirna.model
+# word2vec_deepmirtar_418_target.model
+
+# These pretrained representations were used together with the
+# Graph Convolutional Network (GCN) GraphTar checkpoint.
+
+
+============================================================
+28) GRAPHTAR - MODEL CHECKPOINT
+============================================================
+
+# GraphTar checkpoint used for inference:
+
+# graphtar_net_graphtar_config_deepmirtar_w2v_GCN_128_418_0.001.ckpt
+
+# Model configuration:
+#
+# Architecture: Graph Neural Network / GCN
+# Sequence representation: Word2Vec
+# Hidden dimension: 128
+# Dataset/model configuration: 418
+# Learning rate in checkpoint configuration: 0.001
+#
+# No model retraining was performed.
+# The pretrained checkpoint was used directly for inference.
+
+
+============================================================
+29) GRAPHTAR - INFERENCE ON 1018 SAMPLES
+============================================================
+
+cd ~/graphtar
+
+python ago2_inference.py
+
+# The script:
+#
+# 1. Loads the official AGO2_CLASH_Hejret2023 test dataset.
+# 2. Reads miRNA and target sequences.
+# 3. Adapts the dataset columns to GraphTar format.
+# 4. Loads the pretrained Word2Vec models.
+# 5. Loads the pretrained GraphTar checkpoint.
+# 6. Generates prediction scores for all 1018 samples.
+# 7. Saves the predictions to CSV.
+
+
+============================================================
+30) GRAPHTAR - PREDICTION OUTPUT
+============================================================
+
+# Expected output:
+
+ago2_graphtar_predictions.csv
+
+# Check the generated file:
+
+python - <<'PY'
+import pandas as pd
+
+file = "ago2_graphtar_predictions.csv"
+
+df = pd.read_csv(file)
+
+print("Shape:", df.shape)
+print("Columns:")
+print(df.columns.tolist())
+
+print("\nFirst rows:")
+print(df.head().to_string(index=False))
+PY
+
+
+============================================================
+31) GRAPHTAR - PREDICTION FILE CHECK
+============================================================
+
+# Confirm that the number of predictions matches the
+# official test set.
+
+python - <<'PY'
+import pandas as pd
+
+dataset = pd.read_csv(
+    "/home/mohannad/.miRBench/datasets/20540907/AGO2_CLASH_Hejret2023/test/dataset.tsv",
+    sep="\t"
+)
+
+predictions = pd.read_csv(
+    "ago2_graphtar_predictions.csv"
+)
+
+print("Official samples :", len(dataset))
+print("GraphTar samples :", len(predictions))
+
+if len(dataset) == len(predictions):
+    print("OK: All 1018 samples have predictions.")
+else:
+    print("WARNING: Sample counts do not match.")
+PY
+
+
+============================================================
+32) GRAPHTAR - METRICS AT THRESHOLDS 0.5 AND 0.7
+============================================================
+
+cd ~/graphtar
+
+python - <<'PY'
+import pandas as pd
+
+from sklearn.metrics import (
+    average_precision_score,
+    roc_auc_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix
+)
+
+df = pd.read_csv("ago2_graphtar_predictions.csv")
+
+# Adjust these column names only if the generated CSV
+# uses different names.
+y_true = df["label"].astype(int)
+y_score = df["prediction_score"].astype(float)
+
+print("============================================")
+print("GRAPHTAR - AGO2_CLASH_Hejret2023 (test)")
+print("============================================")
+
+print("Samples:", len(df))
+print("Positive:", (y_true == 1).sum())
+print("Negative:", (y_true == 0).sum())
+
+for threshold in [0.5, 0.7]:
+
+    y_pred = (y_score >= threshold).astype(int)
+
+    ap = average_precision_score(y_true, y_score)
+    roc_auc = roc_auc_score(y_true, y_score)
+
+    accuracy = accuracy_score(y_true, y_pred)
+    precision = precision_score(
+        y_true,
+        y_pred,
+        zero_division=0
+    )
+    recall = recall_score(
+        y_true,
+        y_pred,
+        zero_division=0
+    )
+    f1 = f1_score(
+        y_true,
+        y_pred,
+        zero_division=0
+    )
+
+    tn, fp, fn, tp = confusion_matrix(
+        y_true,
+        y_pred,
+        labels=[0, 1]
+    ).ravel()
+
+    specificity = (
+        tn / (tn + fp)
+        if (tn + fp)
+        else 0.0
+    )
+
+    print("\n--------------------------------------------")
+    print(f"Threshold = {threshold}")
+    print("--------------------------------------------")
+
+    print(f"Samples      : {len(df)}")
+    print(f"AP           : {ap:.4f}")
+    print(f"ROC-AUC      : {roc_auc:.4f}")
+    print(f"Accuracy     : {accuracy:.4f}")
+    print(f"Precision    : {precision:.4f}")
+    print(f"Recall       : {recall:.4f}")
+    print(f"Specificity  : {specificity:.4f}")
+    print(f"F1-Score     : {f1:.4f}")
+
+    print(f"TN           : {tn}")
+    print(f"FP           : {fp}")
+    print(f"FN           : {fn}")
+    print(f"TP           : {tp}")
+
+    print(f"Predicted +  : {y_pred.sum()}")
+PY
+
+
+============================================================
+33) GRAPHTAR - EXCEL RESULTS
+============================================================
+
+cd ~/graphtar
+
+python make_graphtar_excel.py
+
+# The script creates an Excel file containing the
+# GraphTar predictions and threshold-based results.
+
+# Expected output:
+
+# GraphTar_results.xlsx
+
+
+============================================================
+34) GRAPHTAR - CHECK EXCEL OUTPUT
+============================================================
+
+ls -lh ~/graphtar/*.xlsx
+
+# Open the Excel file in Windows
+
+explorer.exe "$(wslpath -w ~/graphtar/GraphTar_results.xlsx)"
+
+
+============================================================
+35) GRAPHTAR - TRUE POSITIVE RESULTS
+============================================================
+
+cd ~/graphtar
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("ago2_graphtar_predictions.csv")
+
+for threshold in [0.5, 0.7]:
+
+    tp = df[
+        (df["label"] == 1) &
+        (df["prediction_score"] >= threshold)
+    ].copy()
+
+    print("\n" + "=" * 70)
+    print(
+        f"GraphTar - TRUE POSITIVES - "
+        f"Threshold = {threshold}"
+    )
+    print("=" * 70)
+
+    print("TP count:", len(tp))
+
+    print(tp.to_string(index=False))
+PY
+
+
+============================================================
+36) GRAPHTAR - TRUE POSITIVE EXCEL
+============================================================
+
+cd ~/graphtar
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("ago2_graphtar_predictions.csv")
+
+output = "GraphTar_TruePositives.xlsx"
+
+with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+    for threshold in [0.5, 0.7]:
+
+        tp = df[
+            (df["label"] == 1) &
+            (df["prediction_score"] >= threshold)
+        ].copy()
+
+        tp["threshold"] = threshold
+
+        tp.to_excel(
+            writer,
+            sheet_name=f"TP_{threshold}",
+            index=False
+        )
+
+        print(
+            f"Threshold {threshold}: "
+            f"{len(tp)} TP"
+        )
+
+print(f"\nSaved: {output}")
+PY
+
+
+============================================================
+37) OPEN GRAPHTAR TRUE POSITIVE EXCEL
+============================================================
+
+explorer.exe "$(wslpath -w ~/graphtar/GraphTar_TruePositives.xlsx)"
+
+
+============================================================
+38) GRAPHTAR - OUTPUT FILES
+============================================================
+
+# Main GraphTar prediction file:
+
+ago2_graphtar_predictions.csv
+
+# Excel threshold results:
+
+GraphTar_results.xlsx
+
+# True-positive results:
+
+GraphTar_TruePositives.xlsx
+
+# Main scripts:
+
+ago2_inference.py
+make_graphtar_excel.py
+
+
+============================================================
+39) GRAPHTAR - METHODOLOGY SUMMARY
+============================================================
+
+# GraphTar was evaluated on the official
+# AGO2_CLASH_Hejret2023 test set containing 1018 samples
+# (523 negative and 495 positive interactions).
+
+# Because the original dataset column names were not directly
+# compatible with the expected GraphTar input format, an adapter
+# was used to map the AGO2 CLASH data to the GraphTar input format.
+
+# Pretrained Word2Vec models were used to represent miRNA and
+# target sequences.
+
+# A pretrained GraphTar checkpoint based on a Graph Convolutional
+# Network (GCN) was then used to generate interaction prediction
+# scores.
+
+# No retraining was performed.
+
+# Predictions were evaluated using thresholds of 0.5 and 0.7.
+
+# Threshold-independent metrics:
+# AP
+# ROC-AUC
+
+# Threshold-dependent metrics:
+# Accuracy
+# Precision
+# Recall / Sensitivity
+# Specificity
+# F1-Score
+# TN
+# FP
+# FN
+# TP
+
+
+============================================================
+40) GRAPHTAR - USEFUL CHECKS
+============================================================
+
+cd ~/graphtar
+
+# Check scripts
+ls -lh *.py
+
+# Check predictions
+ls -lh ago2_graphtar_predictions.csv
+
+# Check Excel outputs
+ls -lh *.xlsx
+
+# Check prediction columns
+python - <<'PY'
+import pandas as pd
+
+for f in [
+    "ago2_graphtar_predictions.csv"
+]:
+
+    try:
+        df = pd.read_csv(f)
+
+        print("\nFILE:", f)
+        print("Shape:", df.shape)
+        print("Columns:", list(df.columns))
+        print(df.head(3).to_string(index=False))
+
+    except FileNotFoundError:
+
+        print("\nMissing:", f)
+PY
